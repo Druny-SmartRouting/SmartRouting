@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Google.OrTools.ConstraintSolver;
 using SmartRouting.Types;
@@ -11,7 +12,6 @@ namespace SmartRouting.Services
         public string SolveAndReturnText(OrToolsData data)
         {
             StringBuilder sb = new StringBuilder();
-
             int totalNodes = data.TimeMatrix.GetLength(0);
 
             RoutingIndexManager manager = new RoutingIndexManager(
@@ -21,6 +21,8 @@ namespace SmartRouting.Services
                 data.Ends);
 
             RoutingModel routing = new RoutingModel(manager);
+            
+            Solver solver = routing.solver(); 
 
             int transitCallbackIndex = routing.RegisterTransitCallback((long fromIndex, long toIndex) =>
             {
@@ -40,13 +42,29 @@ namespace SmartRouting.Services
 
                 long index = manager.NodeToIndex(i);
                 
-                timeDimension.CumulVar(index).SetRange(data.TimeWindows[i, 0], data.TimeWindows[i, 1]);
-
+                timeDimension.CumulVar(index).SetRange(0, 1440);
                 routing.AddDisjunction(new long[] { index }, 100000);
+
+                long[] openTimes = new long[data.VehiclesNumber];
+                long[] closeTimes = new long[data.VehiclesNumber];
 
                 for (int v = 0; v < data.VehiclesNumber; ++v)
                 {
+                    int dayOfWeek = data.TechAssignedDay[v] % 7;
+                    openTimes[v] = data.SiteOpenTimes[i, dayOfWeek];
+                    closeTimes[v] = data.SiteCloseTimes[i, dayOfWeek];
+
                     bool canServe = true;
+
+                    ServiceType reqType = data.SiteRequiredServiceType[i];
+                    SkillLevel reqLevel = data.SiteRequiredSkillLevel[i];
+                    SkillLevel techLevel = SkillLevel.None;
+
+                    if (reqType == ServiceType.Interior) techLevel = data.TechSkillInterior[v];
+                    else if (reqType == ServiceType.Exterior) techLevel = data.TechSkillExterior[v];
+                    else if (reqType == ServiceType.Floral) techLevel = data.TechSkillFloral[v];
+
+                    if (techLevel < reqLevel) canServe = false;
 
                     if (data.SiteRequiresPhysical[i] && !data.TechCanDoPhysical[v]) canServe = false;
                     if (data.SiteRequiresLivingWalls[i] && !data.TechSkilledLivingWalls[v]) canServe = false;
@@ -55,25 +73,29 @@ namespace SmartRouting.Services
                     if (data.SiteRequiresPesticides[i] && !data.TechCertifiedPesticides[v]) canServe = false;
                     if (data.SiteRequiresCitizen[i] && !data.TechIsCitizen[v]) canServe = false;
                     
-                    if (data.SiteRequiredSkillLevel[i] > data.TechSkillLevel[v]) canServe = false;
-
                     int techDay = data.TechAssignedDay[v];
-                    int siteStartDay = data.SiteAllowedDays[i, 0];
-                    int siteEndDay = data.SiteAllowedDays[i, 1];
+                    if (techDay < data.SiteAllowedDays[i, 0] || techDay > data.SiteAllowedDays[i, 1]) canServe = false;
 
-                    if (techDay < siteStartDay || techDay > siteEndDay) 
-                    {
-                        canServe = false;
-                    }
-                    
+                    if (openTimes[v] == 0 && closeTimes[v] == 0) canServe = false;
+
                     if (!canServe)
                     {
                         routing.VehicleVar(index).RemoveValue(v);
                     }
                 }
+
+                IntVar isActive = routing.ActiveVar(index);
+                IntVar safeVehicleVar = solver.MakeMax(routing.VehicleVar(index), 0).Var();
+
+                IntExpr openExpr = solver.MakeElement(openTimes, safeVehicleVar);
+                IntExpr closeExpr = solver.MakeElement(closeTimes, safeVehicleVar);
+
+                IntExpr penalty = (1 - isActive) * 100000;
+
+                solver.Add(timeDimension.CumulVar(index) >= openExpr - penalty);
+                solver.Add(timeDimension.CumulVar(index) + data.ServiceDurations[i] <= closeExpr + penalty);
             }
 
-            Solver solver = routing.solver();
             long[] nodeVisitTransit = new long[routing.Size()];
             for (int i = 0; i < routing.Size(); ++i)
             {
@@ -94,7 +116,7 @@ namespace SmartRouting.Services
                     data.BreakWindows[i, 0], 
                     data.BreakWindows[i, 1], 
                     data.Breaks[i],          
-                    false,                   
+                    true,                   
                     $"Break_Tech_{i}");
                 
                 breaks.Add(breakInterval);
@@ -103,7 +125,7 @@ namespace SmartRouting.Services
 
             RoutingSearchParameters searchParameters = operations_research_constraint_solver.DefaultRoutingSearchParameters();
             searchParameters.FirstSolutionStrategy = FirstSolutionStrategy.Types.Value.PathCheapestArc;
-            searchParameters.TimeLimit = new Google.Protobuf.WellKnownTypes.Duration { Seconds = 5 };
+            searchParameters.TimeLimit = new Google.Protobuf.WellKnownTypes.Duration { Seconds = 15 };
 
             Assignment solution = routing.SolveWithParameters(searchParameters);
 
@@ -179,7 +201,7 @@ namespace SmartRouting.Services
                     if (routing.IsStart(index)) {
                         routeStr += $"[Start] {data.NodeNames[node]} (Dep: {FormatTime(minTime)}) -> ";
                     } else {
-                        routeStr += $"[Visit] {data.NodeNames[node]} (Arr: {FormatTime(minTime)}) -> ";
+                        routeStr += $"[Visit] {data.NodeNames[node]} (Arr: {FormatTime(minTime)}, Job: {data.ServiceDurations[node]}m) -> ";
                     }
                     
                     index = solution.Value(routing.NextVar(index));
@@ -194,16 +216,15 @@ namespace SmartRouting.Services
                 { 
                     TechName = techName, 
                     Day = day, 
-                    Skill = data.TechSkillLevel[i], 
                     RouteString = routeStr 
                 });
             }
 
-            var sortedRoutes = routes.OrderBy(r => r.TechName).ThenBy(r => r.Day).ToList();
+            var sortedRoutes = routes.OrderBy(r => r.Day).ThenBy(r => r.TechName).ToList();
 
             foreach (var r in sortedRoutes)
             {
-                sb.AppendLine($"--- Technician: {r.TechName} (Skill: {r.Skill}, Assigned Day: {r.Day}) ---");
+                sb.AppendLine($"--- Day {r.Day} | Technician: {r.TechName} ---");
                 sb.AppendLine(r.RouteString + "\n");
             }
         }
@@ -212,7 +233,6 @@ namespace SmartRouting.Services
         {
             public string TechName { get; set; }
             public int Day { get; set; }
-            public SkillLevel Skill { get; set; }
             public string RouteString { get; set; }
         }
     }
