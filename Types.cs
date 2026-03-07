@@ -1,7 +1,6 @@
 namespace SmartRouting.Types
 {
     public enum SkillLevel { None = 0, Junior = 1, Medior = 2, Senior = 3 }
-    
     public enum ServiceType { Interior, Exterior, Floral }
 
     public class Coordinates
@@ -31,6 +30,14 @@ namespace SmartRouting.Types
         public int[,] SiteOpenTimes { get; set; } = null!;
         public int[,] SiteCloseTimes { get; set; } = null!;
 
+        public bool[,] TechAllowedAtSite { get; set; } = null!;
+
+        public int[] VehicleMaxHoursPerDay { get; set; } = null!; 
+
+        public int[] VehicleToRealTech { get; set; } = null!; 
+        public int[] VehicleWeekNumber { get; set; } = null!; 
+        public int[] RealTechMaxHoursPerWeek { get; set; } = null!; 
+
         public SkillLevel[] TechSkillInterior { get; set; } = null!;
         public SkillLevel[] TechSkillExterior { get; set; } = null!;
         public SkillLevel[] TechSkillFloral { get; set; } = null!;
@@ -41,10 +48,9 @@ namespace SmartRouting.Types
         public bool[] TechCertifiedLift { get; set; } = null!;
         public bool[] TechCertifiedPesticides { get; set; } = null!;
         public bool[] TechIsCitizen { get; set; } = null!;
-
+        
         public ServiceType[] SiteRequiredServiceType { get; set; } = null!;
         public SkillLevel[] SiteRequiredSkillLevel { get; set; } = null!;
-        
         public bool[] SiteRequiresPhysical { get; set; } = null!;
         public bool[] SiteRequiresLivingWalls { get; set; } = null!;
         public bool[] SiteRequiresHeights { get; set; } = null!;

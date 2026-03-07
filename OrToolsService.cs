@@ -75,8 +75,9 @@ namespace SmartRouting.Services
                     
                     int techDay = data.TechAssignedDay[v];
                     if (techDay < data.SiteAllowedDays[i, 0] || techDay > data.SiteAllowedDays[i, 1]) canServe = false;
-
                     if (openTimes[v] == 0 && closeTimes[v] == 0) canServe = false;
+
+                    if (!data.TechAllowedAtSite[i, v]) canServe = false;
 
                     if (!canServe)
                     {
@@ -85,7 +86,7 @@ namespace SmartRouting.Services
                 }
 
                 IntVar isActive = routing.ActiveVar(index);
-                IntVar safeVehicleVar = solver.MakeMax(routing.VehicleVar(index), 0).Var();
+                IntVar safeVehicleVar = solver.MakeMax(routing.VehicleVar(index), 0).Var(); 
 
                 IntExpr openExpr = solver.MakeElement(openTimes, safeVehicleVar);
                 IntExpr closeExpr = solver.MakeElement(closeTimes, safeVehicleVar);
@@ -121,11 +122,39 @@ namespace SmartRouting.Services
                 
                 breaks.Add(breakInterval);
                 timeDimension.SetBreakIntervalsOfVehicle(breaks, i, nodeVisitTransit);
+
+                IntExpr routeDuration = timeDimension.CumulVar(endIndex) - timeDimension.CumulVar(startIndex);
+                solver.Add(routeDuration <= data.VehicleMaxHoursPerDay[i] * 60);
+            }
+
+            var weeklyGroups = new Dictionary<string, List<int>>();
+            for (int i = 0; i < data.VehiclesNumber; i++)
+            {
+                string key = $"{data.VehicleToRealTech[i]}_{data.VehicleWeekNumber[i]}";
+                if (!weeklyGroups.ContainsKey(key)) weeklyGroups[key] = new List<int>();
+                weeklyGroups[key].Add(i);
+            }
+
+            foreach (var kvp in weeklyGroups)
+            {
+                string[] parts = kvp.Key.Split('_');
+                int realTechId = int.Parse(parts[0]);
+                int maxWeeklyMinutes = data.RealTechMaxHoursPerWeek[realTechId] * 60;
+
+                IntExpr weeklyWork = solver.MakeIntConst(0);
+                foreach (int v in kvp.Value)
+                {
+                    long startIndex = routing.Start(v);
+                    long endIndex = routing.End(v);
+                    weeklyWork = weeklyWork + (timeDimension.CumulVar(endIndex) - timeDimension.CumulVar(startIndex));
+                }
+                
+                solver.Add(weeklyWork <= maxWeeklyMinutes);
             }
 
             RoutingSearchParameters searchParameters = operations_research_constraint_solver.DefaultRoutingSearchParameters();
             searchParameters.FirstSolutionStrategy = FirstSolutionStrategy.Types.Value.PathCheapestArc;
-            searchParameters.TimeLimit = new Google.Protobuf.WellKnownTypes.Duration { Seconds = 15 };
+            searchParameters.TimeLimit = new Google.Protobuf.WellKnownTypes.Duration { Seconds = 300 };
 
             Assignment solution = routing.SolveWithParameters(searchParameters);
 
@@ -192,6 +221,8 @@ namespace SmartRouting.Services
                 int day = data.TechAssignedDay[i];
                 string routeStr = "";
 
+                long shiftStartTime = solution.Min(timeDimension.CumulVar(index));
+
                 while (!routing.IsEnd(index))
                 {
                     var timeVar = timeDimension.CumulVar(index);
@@ -210,7 +241,10 @@ namespace SmartRouting.Services
                 var endTimeVar = timeDimension.CumulVar(index);
                 long finishTime = solution.Min(endTimeVar);
                 int endNode = manager.IndexToNode(index);
-                routeStr += $"[Finish] {data.NodeNames[endNode]} (Arr: {FormatTime(finishTime)})";
+                
+                long totalShiftDuration = finishTime - shiftStartTime;
+                
+                routeStr += $"[Finish] {data.NodeNames[endNode]} (Arr: {FormatTime(finishTime)}) |[Shift Duration: {FormatTime(totalShiftDuration)}]";
 
                 routes.Add(new RouteResult 
                 { 

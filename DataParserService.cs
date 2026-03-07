@@ -60,29 +60,14 @@ namespace SmartRouting.Services
                 string val3 = sheet.Cell(3, col).GetString().Trim();
 
                 var foundDay = daysOfWeek.FirstOrDefault(d => val2.StartsWith(d, StringComparison.OrdinalIgnoreCase));
-                if (foundDay != null)
-                {
-                    currentDay = foundDay;
-                }
+                if (foundDay != null) currentDay = foundDay;
 
-                if (currentDay != null && val3.Equals("from", StringComparison.OrdinalIgnoreCase))
-                {
-                    map[$"{currentDay}_from"] = col;
-                }
-                else if (currentDay != null && val3.Equals("to", StringComparison.OrdinalIgnoreCase))
-                {
-                    map[$"{currentDay}_to"] = col;
-                }
+                if (currentDay != null && val3.Equals("from", StringComparison.OrdinalIgnoreCase)) map[$"{currentDay}_from"] = col;
+                else if (currentDay != null && val3.Equals("to", StringComparison.OrdinalIgnoreCase)) map[$"{currentDay}_to"] = col;
                 else
                 {
-                    if (!string.IsNullOrEmpty(val2) && foundDay == null)
-                    {
-                        map[NormalizeHeader(val2)] = col;
-                    }
-                    else if (!string.IsNullOrEmpty(val1) && string.IsNullOrEmpty(val2))
-                    {
-                        map[NormalizeHeader(val1)] = col;
-                    }
+                    if (!string.IsNullOrEmpty(val2) && foundDay == null) map[NormalizeHeader(val2)] = col;
+                    else if (!string.IsNullOrEmpty(val1) && string.IsNullOrEmpty(val2)) map[NormalizeHeader(val1)] = col;
                 }
             }
             return map;
@@ -99,21 +84,30 @@ namespace SmartRouting.Services
             foreach (var name in possibleNames)
             {
                 var normalizedName = NormalizeHeader(name);
-                
-                if (map.TryGetValue(normalizedName, out int col))
-                    return col;
-
-                var partialMatch = map.Keys.FirstOrDefault(k => k.Contains(normalizedName) || normalizedName.Contains(k));
-                if (partialMatch != null)
-                    return map[partialMatch];
+                if (map.TryGetValue(normalizedName, out int col)) return col;
             }
-            return -1;
+
+            foreach (var name in possibleNames)
+            {
+                var normalizedName = NormalizeHeader(name);
+                if (normalizedName.Length < 4) continue;
+
+                var partialMatch = map.Keys.FirstOrDefault(k => k.Contains(normalizedName));
+                if (partialMatch != null) return map[partialMatch];
+            }
+            return -1; 
         }
 
         private string GetString(IXLWorksheet sheet, int row, int col)
         {
-            if (col <= 0) return string.Empty;
+            if (col <= 0) return string.Empty; 
             return sheet.Cell(row, col).GetString()?.Trim() ?? string.Empty;
+        }
+
+        private List<string> ParseNameList(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input)) return new List<string>();
+            return input.Split(',').Select(s => s.Trim().ToLowerInvariant()).Where(s => !string.IsNullOrEmpty(s)).ToList();
         }
 
         private List<RawSite> ReadRawSites(IXLWorksheet sheet)
@@ -121,17 +115,22 @@ namespace SmartRouting.Services
             var sites = new List<RawSite>();
             var map = BuildColumnMap(sheet);
 
-            int colName = GetColIndex(map, "site name or code", "name");
-            int colAddress = GetColIndex(map, "site address");
-            int colFreq = GetColIndex(map, "visit frequency");
-            int colDuration = GetColIndex(map, "est duration");
-            int colSkill = GetColIndex(map, "service skill requirement");
-            int colPhys = GetColIndex(map, "physically demanding");
-            int colWalls = GetColIndex(map, "living walls");
+            int colName = GetColIndex(map, "site name or code", "site name", "name");
+            int colAddress = GetColIndex(map, "site address", "address");
+            int colFreq = GetColIndex(map, "visit frequency", "frequency");
+            int colDuration = GetColIndex(map, "est duration of the visit", "est duration", "duration");
+            int colSkill = GetColIndex(map, "service skill requirement", "skill requirement", "service skill");
+            int colPhys = GetColIndex(map, "physically demanding job", "physically demanding");
+            int colWalls = GetColIndex(map, "has living walls", "living walls");
             int colHeights = GetColIndex(map, "work at heights");
-            int colLift = GetColIndex(map, "using the lift");
-            int colPest = GetColIndex(map, "application of pesticides");
-            int colCit = GetColIndex(map, "citizen technician");
+            int colLift = GetColIndex(map, "requires using the lift", "using the lift");
+            int colPest = GetColIndex(map, "requires application of pesticides", "application of pesticides", "pesticides");
+            int colCit = GetColIndex(map, "requires a citizen technician", "citizen technician", "citizen");
+            
+            int colPermitReq = GetColIndex(map, "permit required");
+            int colTechsPermit = GetColIndex(map, "techs with permit");
+            int colPrefTechs = GetColIndex(map, "should be serviced by specific technician", "should be serviced by");
+            int colBannedTechs = GetColIndex(map, "should not be serviced by the following technician", "should not be serviced by");
 
             string[] daysOfWeek = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
 
@@ -150,7 +149,12 @@ namespace SmartRouting.Services
                     ReqHeights = ParseBool(GetString(sheet, row, colHeights)),
                     ReqLift = ParseBool(GetString(sheet, row, colLift)),
                     ReqPesticides = ParseBool(GetString(sheet, row, colPest)),
-                    ReqCitizen = ParseBool(GetString(sheet, row, colCit))
+                    ReqCitizen = ParseBool(GetString(sheet, row, colCit)),
+                    
+                    PermitRequired = ParseBool(GetString(sheet, row, colPermitReq)),
+                    TechsWithPermit = ParseNameList(GetString(sheet, row, colTechsPermit)),
+                    PreferredTechs = ParseNameList(GetString(sheet, row, colPrefTechs)),
+                    BannedTechs = ParseNameList(GetString(sheet, row, colBannedTechs))
                 };
 
                 for (int day = 0; day < 7; day++)
@@ -177,21 +181,24 @@ namespace SmartRouting.Services
             var techs = new List<RawTech>();
             var map = BuildColumnMap(sheet);
 
-            int colName = GetColIndex(map, "name");
+            int colName = GetColIndex(map, "name", "technician name");
             int colHome = GetColIndex(map, "home address");
             int colOffice = GetColIndex(map, "office address");
             int colStartFrom = GetColIndex(map, "starts from");
             int colFinishAt = GetColIndex(map, "finishes at");
-            int colBreakDur = GetColIndex(map, "min break");
+            int colBreakDur = GetColIndex(map, "min break", "break duration");
             int colBreakStart = GetColIndex(map, "not earlier than", "break start");
             int colBreakEnd = GetColIndex(map, "not later than", "break end");
             int colSkill = GetColIndex(map, "service skills");
             int colPhys = GetColIndex(map, "physically demanding");
             int colWalls = GetColIndex(map, "living walls");
             int colHeights = GetColIndex(map, "work at heights");
-            int colLift = GetColIndex(map, "using the lift");
+            int colLift = GetColIndex(map, "using the lift", "certified with using the lift");
             int colPest = GetColIndex(map, "pesticide applicator");
             int colCit = GetColIndex(map, "is a citizen");
+            
+            int colMaxDay = GetColIndex(map, "maximum hours of work per day", "hours of work per day");
+            int colMaxWeek = GetColIndex(map, "maximum hours of work per week", "hours of work per week");
 
             string[] daysOfWeek = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
 
@@ -221,7 +228,10 @@ namespace SmartRouting.Services
                     CanHeights = ParseBool(GetString(sheet, row, colHeights)),
                     CanLift = ParseBool(GetString(sheet, row, colLift)),
                     CanPesticides = ParseBool(GetString(sheet, row, colPest)),
-                    IsCitizen = ParseBool(GetString(sheet, row, colCit))
+                    IsCitizen = ParseBool(GetString(sheet, row, colCit)),
+
+                    MaxHoursPerDay = int.TryParse(GetString(sheet, row, colMaxDay), out var md) ? md : 24,
+                    MaxHoursPerWeek = int.TryParse(GetString(sheet, row, colMaxWeek), out var mw) ? mw : 168
                 };
 
                 for (int day = 0; day < 7; day++)
@@ -302,7 +312,6 @@ namespace SmartRouting.Services
                 TechSkillInterior = new SkillLevel[numVehicles],
                 TechSkillExterior = new SkillLevel[numVehicles],
                 TechSkillFloral = new SkillLevel[numVehicles],
-                
                 TechCanDoPhysical = new bool[numVehicles],
                 TechSkilledLivingWalls = new bool[numVehicles],
                 TechComfortableHeights = new bool[numVehicles],
@@ -325,8 +334,19 @@ namespace SmartRouting.Services
                 NodeNames = new string[numNodes],
                 
                 SiteOpenTimes = new int[numNodes, 7],
-                SiteCloseTimes = new int[numNodes, 7]
+                SiteCloseTimes = new int[numNodes, 7],
+
+                TechAllowedAtSite = new bool[numNodes, numVehicles],
+                VehicleMaxHoursPerDay = new int[numVehicles],
+                VehicleToRealTech = new int[numVehicles],
+                VehicleWeekNumber = new int[numVehicles]
             };
+
+            var realTechs = vTechs.Select(vt => vt.Tech).Distinct().ToList();
+            data.RealTechMaxHoursPerWeek = new int[realTechs.Count];
+            for (int i = 0; i < realTechs.Count; i++) {
+                data.RealTechMaxHoursPerWeek[i] = realTechs[i].MaxHoursPerWeek;
+            }
 
             data.TimeMatrix = new int[numNodes, numNodes];
             List<string> nodeAddresses = new List<string>();
@@ -367,6 +387,10 @@ namespace SmartRouting.Services
                 data.BreakWindows[i, 1] = vt.Tech.BreakEnd;
                 data.TechAssignedDay[i] = vt.AssignedDay;
 
+                data.VehicleMaxHoursPerDay[i] = vt.Tech.MaxHoursPerDay;
+                data.VehicleToRealTech[i] = realTechs.IndexOf(vt.Tech);
+                data.VehicleWeekNumber[i] = vt.AssignedDay / 7;
+
                 ParseTechSkills(vt.Tech.SkillsStr, out var iLvl, out var eLvl, out var fLvl);
                 data.TechSkillInterior[i] = iLvl;
                 data.TechSkillExterior[i] = eLvl;
@@ -392,6 +416,8 @@ namespace SmartRouting.Services
                         data.SiteOpenTimes[i, day] = 0;
                         data.SiteCloseTimes[i, day] = 1440;
                     }
+
+                    for (int v = 0; v < numVehicles; v++) data.TechAllowedAtSite[i, v] = true;
                 }
                 else
                 {
@@ -415,6 +441,18 @@ namespace SmartRouting.Services
                     for (int day = 0; day < 7; day++) {
                         data.SiteOpenTimes[i, day] = vs.Site.OpenTimes[day];
                         data.SiteCloseTimes[i, day] = vs.Site.CloseTimes[day];
+                    }
+
+                    for (int v = 0; v < numVehicles; v++)
+                    {
+                        string techName = vTechs[v].Tech.Name.Trim().ToLowerInvariant();
+                        bool isAllowed = true;
+
+                        if (vs.Site.PermitRequired && !vs.Site.TechsWithPermit.Contains(techName)) isAllowed = false;
+                        if (vs.Site.PreferredTechs.Count > 0 && !vs.Site.PreferredTechs.Contains(techName)) isAllowed = false;
+                        if (vs.Site.BannedTechs.Count > 0 && vs.Site.BannedTechs.Contains(techName)) isAllowed = false;
+
+                        data.TechAllowedAtSite[i, v] = isAllowed;
                     }
                 }
             }
@@ -459,8 +497,8 @@ namespace SmartRouting.Services
             var parts = skillsStr.ToLower().Split(',');
             foreach (var p in parts)
             {
-                if (p.Contains("interior")) interior = ExtractLevel(p);
-                if (p.Contains("exterior")) exterior = ExtractLevel(p);
+                if (p.Contains("interior") || p.Contains("internal")) interior = ExtractLevel(p);
+                if (p.Contains("exterior") || p.Contains("external")) exterior = ExtractLevel(p);
                 if (p.Contains("floral")) floral = ExtractLevel(p);
             }
         }
@@ -472,8 +510,9 @@ namespace SmartRouting.Services
             if (string.IsNullOrWhiteSpace(skillStr)) return;
             
             var s = skillStr.ToLower();
-            if (s.Contains("exterior")) type = ServiceType.Exterior;
+            if (s.Contains("exterior") || s.Contains("external")) type = ServiceType.Exterior;
             else if (s.Contains("floral")) type = ServiceType.Floral;
+            else if (s.Contains("interior") || s.Contains("internal")) type = ServiceType.Interior;
             
             level = ExtractLevel(s);
         }
@@ -493,6 +532,13 @@ namespace SmartRouting.Services
             if (string.IsNullOrWhiteSpace(timeStr)) return defaultMinutes;
             if (DateTime.TryParse(timeStr, out DateTime dt)) return (int)dt.TimeOfDay.TotalMinutes;
             if (TimeSpan.TryParse(timeStr, out TimeSpan ts)) return (int)ts.TotalMinutes;
+
+            var parts = timeStr.Split(':');
+            if (parts.Length == 2 && int.TryParse(parts[0], out int h) && int.TryParse(parts[1], out int m))
+            {
+                return h * 60 + m;
+            }
+
             return defaultMinutes;
         }
     }
@@ -511,6 +557,10 @@ namespace SmartRouting.Services
         public bool ReqLift { get; set; }
         public bool ReqPesticides { get; set; }
         public bool ReqCitizen { get; set; }
+        public bool PermitRequired { get; set; }
+        public List<string> TechsWithPermit { get; set; } = new();
+        public List<string> PreferredTechs { get; set; } = new();
+        public List<string> BannedTechs { get; set; } = new();
     }
 
     public class RawTech {
@@ -529,6 +579,8 @@ namespace SmartRouting.Services
         public bool CanLift { get; set; }
         public bool CanPesticides { get; set; }
         public bool IsCitizen { get; set; }
+        public int MaxHoursPerDay { get; set; }
+        public int MaxHoursPerWeek { get; set; }
     }
 
     public class VirtualTech {
