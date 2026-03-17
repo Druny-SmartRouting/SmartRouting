@@ -1,17 +1,27 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Google.OrTools.ConstraintSolver;
 using SmartRouting.Types;
 
 namespace SmartRouting.Services
 {
+    public class ActivityRecord
+    {
+        [JsonPropertyName("date")] public string Date { get; set; }[JsonPropertyName("day_of_week")] public string DayOfWeek { get; set; }[JsonPropertyName("start_time")] public string StartTime { get; set; }
+        [JsonPropertyName("end_time")] public string EndTime { get; set; }
+        [JsonPropertyName("technician_name")] public string TechnicianName { get; set; }
+        [JsonPropertyName("location_name")] public string LocationName { get; set; }
+        [JsonPropertyName("location_to")] public string LocationTo { get; set; }
+        [JsonPropertyName("activity_type")] public string ActivityType { get; set; }
+    }
+
     public class OrToolsService
     {
-        public string SolveAndReturnText(OrToolsData data)
+        public string SolveAndReturnJson(OrToolsData data)
         {
-            StringBuilder sb = new StringBuilder();
             int totalNodes = data.TimeMatrix.GetLength(0);
 
             RoutingIndexManager manager = new RoutingIndexManager(
@@ -21,7 +31,6 @@ namespace SmartRouting.Services
                 data.Ends);
 
             RoutingModel routing = new RoutingModel(manager);
-            
             Solver solver = routing.solver(); 
 
             int transitCallbackIndex = routing.RegisterTransitCallback((long fromIndex, long toIndex) =>
@@ -32,7 +41,6 @@ namespace SmartRouting.Services
             });
 
             routing.SetArcCostEvaluatorOfAllVehicles(transitCallbackIndex);
-
             routing.AddDimension(transitCallbackIndex, 1440, 1440, false, "Time");
             RoutingDimension timeDimension = routing.GetMutableDimension("Time");
 
@@ -65,7 +73,6 @@ namespace SmartRouting.Services
                     else if (reqType == ServiceType.Floral) techLevel = data.TechSkillFloral[v];
 
                     if (techLevel < reqLevel) canServe = false;
-
                     if (data.SiteRequiresPhysical[i] && !data.TechCanDoPhysical[v]) canServe = false;
                     if (data.SiteRequiresLivingWalls[i] && !data.TechSkilledLivingWalls[v]) canServe = false;
                     if (data.SiteRequiresHeights[i] && !data.TechComfortableHeights[v]) canServe = false;
@@ -76,7 +83,6 @@ namespace SmartRouting.Services
                     int techDay = data.TechAssignedDay[v];
                     if (techDay < data.SiteAllowedDays[i, 0] || techDay > data.SiteAllowedDays[i, 1]) canServe = false;
                     if (openTimes[v] == 0 && closeTimes[v] == 0) canServe = false;
-
                     if (!data.TechAllowedAtSite[i, v]) canServe = false;
 
                     if (!canServe)
@@ -104,6 +110,8 @@ namespace SmartRouting.Services
                 nodeVisitTransit[i] = data.ServiceDurations[node];
             }
 
+            var techBreaks = new Dictionary<int, IntervalVar>();
+
             for (int i = 0; i < data.VehiclesNumber; ++i)
             {
                 long startIndex = routing.Start(i);
@@ -121,6 +129,7 @@ namespace SmartRouting.Services
                     $"Break_Tech_{i}");
                 
                 breaks.Add(breakInterval);
+                techBreaks[i] = breakInterval;
                 timeDimension.SetBreakIntervalsOfVehicle(breaks, i, nodeVisitTransit);
 
                 IntExpr routeDuration = timeDimension.CumulVar(endIndex) - timeDimension.CumulVar(startIndex);
@@ -154,20 +163,16 @@ namespace SmartRouting.Services
 
             RoutingSearchParameters searchParameters = operations_research_constraint_solver.DefaultRoutingSearchParameters();
             searchParameters.FirstSolutionStrategy = FirstSolutionStrategy.Types.Value.PathCheapestArc;
-            searchParameters.TimeLimit = new Google.Protobuf.WellKnownTypes.Duration { Seconds = 300 };
+            searchParameters.TimeLimit = new Google.Protobuf.WellKnownTypes.Duration { Seconds = 15 };
 
             Assignment solution = routing.SolveWithParameters(searchParameters);
 
             if (solution != null)
             {
-                FormatSolution(data, routing, manager, solution, timeDimension, sb);
+                return FormatSolutionJson(data, routing, manager, solution, timeDimension, techBreaks);
             }
-            else
-            {
-                sb.AppendLine("Solution haven't been found. Constraints are mathematically impossible.");
-            }
-
-            return sb.ToString();
+            
+            return JsonSerializer.Serialize(new { error = "Solution haven't been found. Constraints are mathematically impossible." });
         }
 
         private bool IsDepot(int node, int[] starts, int[] ends)
@@ -182,92 +187,96 @@ namespace SmartRouting.Services
             return $"{h:D2}:{m:D2}";
         }
 
-        private void FormatSolution(OrToolsData data, RoutingModel routing, RoutingIndexManager manager, Assignment solution, RoutingDimension timeDimension, StringBuilder sb)
+        private string FormatSolutionJson(OrToolsData data, RoutingModel routing, RoutingIndexManager manager, Assignment solution, RoutingDimension timeDimension, Dictionary<int, IntervalVar> techBreaks)
         {
-            List<int> droppedNodes = new List<int>();
-            for (int index = 0; index < routing.Size(); ++index)
-            {
-                if (routing.IsStart(index) || routing.IsEnd(index)) continue;
-                if (solution.Value(routing.NextVar(index)) == index)
-                {
-                    droppedNodes.Add(manager.IndexToNode(index));
-                }
-            }
-
-            if (droppedNodes.Count > 0)
-            {
-                sb.AppendLine("WARNING: The following sites were DROPPED (Constraints too tight):");
-                foreach (var dropped in droppedNodes)
-                {
-                    sb.AppendLine($"- {data.NodeNames[dropped]}");
-                }
-                sb.AppendLine();
-            }
-
-            sb.AppendLine($"Optimization complete. Full cost (drive + work + penalties): {solution.ObjectiveValue()}\n");
-
-            var routes = new List<RouteResult>();
+            var allActivities = new List<ActivityRecord>();
+            
+            DateTime baseDate = new DateTime(2026, 3, 16); 
 
             for (int i = 0; i < data.VehiclesNumber; ++i)
             {
                 long index = routing.Start(i);
-                
-                if (routing.IsEnd(solution.Value(routing.NextVar(index)))) 
-                {
-                    continue; 
-                }
+                if (routing.IsEnd(solution.Value(routing.NextVar(index)))) continue; 
 
                 string techName = data.TechNames[i];
-                int day = data.TechAssignedDay[i];
-                string routeStr = "";
+                int dayOffset = data.TechAssignedDay[i];
+                DateTime currentDate = baseDate.AddDays(dayOffset);
+                string dateStr = currentDate.ToString("yyyy-MM-dd");
+                string dayOfWeek = currentDate.DayOfWeek.ToString();
 
-                long shiftStartTime = solution.Min(timeDimension.CumulVar(index));
+                var techActivities = new List<(long StartMin, ActivityRecord Record)>();
 
                 while (!routing.IsEnd(index))
                 {
-                    var timeVar = timeDimension.CumulVar(index);
-                    long minTime = solution.Min(timeVar);
-                    int node = manager.IndexToNode(index);
-                    
-                    if (routing.IsStart(index)) {
-                        routeStr += $"[Start] {data.NodeNames[node]} (Dep: {FormatTime(minTime)}) -> ";
-                    } else {
-                        routeStr += $"[Visit] {data.NodeNames[node]} (Arr: {FormatTime(minTime)}, Job: {data.ServiceDurations[node]}m) -> ";
+                    long nextIndex = solution.Value(routing.NextVar(index));
+                    int fromNode = manager.IndexToNode(index);
+                    int toNode = manager.IndexToNode(nextIndex);
+
+                    long departureTime = solution.Min(timeDimension.CumulVar(index)) + data.ServiceDurations[fromNode];
+                    long travelTime = data.TimeMatrix[fromNode, toNode];
+                    long arrivalTime = departureTime + travelTime; 
+
+                    string fromName = routing.IsStart(index) ? "Office" : data.NodeNames[fromNode];
+                    string toName = routing.IsEnd(nextIndex) ? "Office" : data.NodeNames[toNode];
+
+                    techActivities.Add((departureTime, new ActivityRecord
+                    {
+                        Date = dateStr,
+                        DayOfWeek = dayOfWeek,
+                        StartTime = FormatTime(departureTime),
+                        EndTime = FormatTime(arrivalTime),
+                        TechnicianName = techName,
+                        LocationName = fromName,
+                        LocationTo = toName,
+                        ActivityType = "Commute"
+                    }));
+
+                    if (!routing.IsEnd(nextIndex))
+                    {
+                        long serviceStart = solution.Min(timeDimension.CumulVar(nextIndex));
+                        long serviceEnd = serviceStart + data.ServiceDurations[toNode];
+                        string activityType = data.SiteRequiredServiceType[toNode].ToString();
+
+                        techActivities.Add((serviceStart, new ActivityRecord
+                        {
+                            Date = dateStr,
+                            DayOfWeek = dayOfWeek,
+                            StartTime = FormatTime(serviceStart),
+                            EndTime = FormatTime(serviceEnd),
+                            TechnicianName = techName,
+                            LocationName = toName,
+                            LocationTo = null,
+                            ActivityType = activityType
+                        }));
                     }
-                    
-                    index = solution.Value(routing.NextVar(index));
+
+                    index = nextIndex;
                 }
 
-                var endTimeVar = timeDimension.CumulVar(index);
-                long finishTime = solution.Min(endTimeVar);
-                int endNode = manager.IndexToNode(index);
-                
-                long totalShiftDuration = finishTime - shiftStartTime;
-                
-                routeStr += $"[Finish] {data.NodeNames[endNode]} (Arr: {FormatTime(finishTime)}) |[Shift Duration: {FormatTime(totalShiftDuration)}]";
+                if (techBreaks.ContainsKey(i) && solution.PerformedValue(techBreaks[i]) == 1)
+                {
+                    long bStart = solution.StartMin(techBreaks[i]);
+                    long bEnd = solution.EndMin(techBreaks[i]);
+                    
+                    techActivities.Add((bStart, new ActivityRecord
+                    {
+                        Date = dateStr,
+                        DayOfWeek = dayOfWeek,
+                        StartTime = FormatTime(bStart),
+                        EndTime = FormatTime(bEnd),
+                        TechnicianName = techName,
+                        LocationName = "En Route / Break",
+                        LocationTo = null,
+                        ActivityType = "Break"
+                    }));
+                }
 
-                routes.Add(new RouteResult 
-                { 
-                    TechName = techName, 
-                    Day = day, 
-                    RouteString = routeStr 
-                });
+                var sortedTechActivities = techActivities.OrderBy(a => a.StartMin).Select(a => a.Record);
+                allActivities.AddRange(sortedTechActivities);
             }
 
-            var sortedRoutes = routes.OrderBy(r => r.Day).ThenBy(r => r.TechName).ToList();
-
-            foreach (var r in sortedRoutes)
-            {
-                sb.AppendLine($"--- Day {r.Day} | Technician: {r.TechName} ---");
-                sb.AppendLine(r.RouteString + "\n");
-            }
-        }
-
-        private class RouteResult
-        {
-            public string TechName { get; set; }
-            public int Day { get; set; }
-            public string RouteString { get; set; }
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            return JsonSerializer.Serialize(allActivities, options);
         }
     }
 }

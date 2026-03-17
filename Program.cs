@@ -30,9 +30,9 @@ app.MapPost("/optimize", async (IFormFile file, DataParserService dataParser, Or
 
         var data = await dataParser.ParseExcelAndGenerateDataAsync(stream);
 
-        string resultText = orTools.SolveAndReturnText(data);
+        string resultJson = orTools.SolveAndReturnJson(data);
 
-        return Results.Text(resultText);
+        return Results.Content(resultJson, "application/json");
     }
     catch (System.Exception ex)
     {
